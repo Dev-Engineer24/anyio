@@ -42,6 +42,7 @@ class MemoryObjectStreamStatistics(NamedTuple):
 
 @dataclass(eq=False)
 class _MemoryObjectItemReceiver(Generic[T_Item]):
+    stream: MemoryObjectReceiveStream[T_Item] | None = field(default=None)
     task_info: TaskInfo = field(init=False, default_factory=get_current_task)
     item: T_Item = field(init=False)
 
@@ -97,7 +98,7 @@ class MemoryObjectReceiveStream(ObjectReceiveStream[T_co], Generic[T_co]):
 
         """
         if self._closed:
-            raise ClosedResourceError
+            raise ClosedResourceError from None
 
         if self._state.waiting_senders:
             # Get the item from the next sender
@@ -119,13 +120,16 @@ class MemoryObjectReceiveStream(ObjectReceiveStream[T_co], Generic[T_co]):
         except WouldBlock:
             # Add ourselves in the queue
             receive_event = Event()
-            receiver = _MemoryObjectItemReceiver[T_co]()
+            receiver = _MemoryObjectItemReceiver[T_co](stream=self)
             self._state.waiting_receivers[receive_event] = receiver
 
             try:
                 await receive_event.wait()
             finally:
                 self._state.waiting_receivers.pop(receive_event, None)
+
+            if self._closed and not hasattr(receiver, "item"):
+                raise ClosedResourceError from None
 
             try:
                 return receiver.item
@@ -143,7 +147,7 @@ class MemoryObjectReceiveStream(ObjectReceiveStream[T_co], Generic[T_co]):
 
         """
         if self._closed:
-            raise ClosedResourceError
+            raise ClosedResourceError from None
 
         return MemoryObjectReceiveStream(_state=self._state)
 
@@ -158,6 +162,10 @@ class MemoryObjectReceiveStream(ObjectReceiveStream[T_co], Generic[T_co]):
         if not self._closed:
             self._closed = True
             self._state.open_receive_channels -= 1
+            for receive_event, receiver in list(self._state.waiting_receivers.items()):
+                if receiver.stream is self:
+                    receive_event.set()
+
             if self._state.open_receive_channels == 0:
                 send_events = list(self._state.waiting_senders.keys())
                 for event in send_events:
@@ -216,13 +224,16 @@ class MemoryObjectSendStream(ObjectSendStream[T_contra], Generic[T_contra]):
 
         """
         if self._closed:
-            raise ClosedResourceError
+            raise ClosedResourceError from None
         if not self._state.open_receive_channels:
             raise BrokenResourceError
 
         while self._state.waiting_receivers:
             receive_event, receiver = self._state.waiting_receivers.popitem(last=False)
-            if not receiver.task_info.has_pending_cancellation():
+            if (
+                not (receiver.stream and receiver.stream._closed)
+                and not receiver.task_info.has_pending_cancellation()
+            ):
                 receiver.item = item
                 receive_event.set()
                 return
@@ -273,7 +284,7 @@ class MemoryObjectSendStream(ObjectSendStream[T_contra], Generic[T_contra]):
 
         """
         if self._closed:
-            raise ClosedResourceError
+            raise ClosedResourceError from None
 
         return MemoryObjectSendStream(_state=self._state)
 

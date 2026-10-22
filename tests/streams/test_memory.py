@@ -524,3 +524,77 @@ async def test_memory_object_item_receiver_repr() -> None:
     receiver.item = "test_item"
     receiver_repr = repr(receiver)
     assert "item='test_item'" in receiver_repr
+
+
+async def test_receive_stream_close_wakes_blocked_receive() -> None:
+    send, receive = create_memory_object_stream[int]()
+    received: list[int] = []
+
+    async def receiver() -> None:
+        try:
+            received.append(await receive.receive())
+        except ClosedResourceError:
+            pass
+
+    with fail_after(2):
+        async with create_task_group() as tg:
+            tg.start_soon(receiver)
+            await wait_all_tasks_blocked()
+            receive.close()
+
+    assert not received
+    send.close()
+
+
+async def test_receive_stream_aclose_wakes_blocked_receive() -> None:
+    send, receive = create_memory_object_stream[int]()
+    received: list[int] = []
+
+    async def receiver() -> None:
+        try:
+            received.append(await receive.receive())
+        except ClosedResourceError:
+            pass
+
+    with fail_after(2):
+        async with create_task_group() as tg:
+            tg.start_soon(receiver)
+            await wait_all_tasks_blocked()
+            await receive.aclose()
+
+    assert not received
+    send.close()
+
+
+async def test_receive_stream_close_clone_only_wakes_own_receivers() -> None:
+    send, receive1 = create_memory_object_stream[int]()
+    receive2 = receive1.clone()
+    results: dict[str, str | int] = {}
+
+    async def receiver1() -> None:
+        try:
+            results["r1"] = await receive1.receive()
+        except ClosedResourceError:
+            results["r1"] = "closed"
+
+    async def receiver2() -> None:
+        try:
+            results["r2"] = await receive2.receive()
+        except ClosedResourceError:
+            results["r2"] = "closed"
+
+    with fail_after(2):
+        async with create_task_group() as tg:
+            tg.start_soon(receiver1)
+            tg.start_soon(receiver2)
+            await wait_all_tasks_blocked()
+            receive1.close()
+            await wait_all_tasks_blocked()
+            assert results == {"r1": "closed"}
+
+            await send.send(42)
+            await wait_all_tasks_blocked()
+            assert results == {"r1": "closed", "r2": 42}
+
+    send.close()
+    receive2.close()

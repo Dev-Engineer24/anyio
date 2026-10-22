@@ -1,0 +1,1 @@
+Fixed ``MemoryObjectReceiveStream.close()`` and ``aclose()`` not waking tasks blocked in ``receive()`` on that stream with ``ClosedResourceError``
